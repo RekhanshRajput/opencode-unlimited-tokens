@@ -41,7 +41,17 @@ sitrep
 curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-tokens/main/bootstrap.sh | bash
 ```
 
-That single line:
+Command map (copy the exact line you need):
+
+| action | command |
+| --- | --- |
+| install / setup | `curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-tokens/main/bootstrap.sh \| bash` |
+| verify setup | `curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-tokens/main/bootstrap.sh \| bash -s -- --check` |
+| install without service restart | `curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-tokens/main/bootstrap.sh \| bash -s -- --no-restart` |
+| uninstall | `curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-tokens/main/bootstrap.sh \| bash -s -- --uninstall` |
+| after install (new shell) | `source ~/.bashrc` |
+
+Install does everything:
 
 1. pulls the latest repo tarball (no `git` needed),
 2. **installs OpenCode 2 first if it is missing** (or just fixes PATH if it is already on disk),
@@ -52,12 +62,16 @@ That single line:
 7. restarts the OpenCode background service so the plugin is live immediately,
 8. prints a status block (`opencode`, `sqlite3`, plugin, config).
 
-Skip any step:
+`--check` is read-only and prints `[ok] / [!!] / [--]` for opencode, plugin,
+config, commands, helpers, sqlite3, runtime, and service. Exit code is `1` if
+anything critical is missing.
+
+Skip any install step:
 
 ```bash
-curl -fsSL .../bootstrap.sh | bash -s -- --no-restart    # keep current service
-curl -fsSL .../bootstrap.sh | bash -s -- --no-opencode   # never auto-install opencode
-curl -fsSL .../bootstrap.sh | bash -s -- --no-sqlite     # never touch apt
+... | bash -s -- --no-restart    # keep current service
+... | bash -s -- --no-opencode   # never auto-install opencode
+... | bash -s -- --no-sqlite     # never touch apt
 ```
 
 Manual clone (same result):
@@ -66,6 +80,7 @@ Manual clone (same result):
 git clone https://github.com/RekhanshRajput/opencode-unlimited-tokens.git
 cd opencode-unlimited-tokens
 ./install.sh
+./install.sh --check
 ```
 
 Hard requirements: `curl` + `tar` only. Everything else is auto-detected,

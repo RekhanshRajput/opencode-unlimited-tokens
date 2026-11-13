@@ -24,6 +24,7 @@ MODE="install"
 for arg in "$@"; do
   case "$arg" in
     --uninstall|-u) MODE="uninstall" ;;
+    --check) MODE="check" ;;
     --no-restart) RESTART=0 ;;
     --restart) RESTART=1 ;;
     --no-opencode) AUTO_OPENCODE=0 ;;
@@ -42,6 +43,7 @@ usage() {
 opencode-unlimited-tokens
 
   ./install.sh                install everything (auto-installs opencode + sqlite3)
+  ./install.sh --check        verify install, config, helpers, plugin runtime
   ./install.sh --no-restart   do not touch the running service
   ./install.sh --no-opencode  do not install opencode automatically
   ./install.sh --no-sqlite    do not install sqlite3 automatically
@@ -389,8 +391,72 @@ do_uninstall() {
   [ "$RESTART" -eq 1 ] && restart_opencode
 }
 
+do_check() {
+  local ok=1
+  pass() { printf '\033[0;32m[ok]\033[0m %-9s %s\n' "$1" "$2"; }
+  fail() { printf '\033[0;31m[!!]\033[0m %-9s %s\n' "$1" "$2"; ok=0; }
+  note() { printf '\033[0;33m[--]\033[0m %-9s %s\n' "$1" "$2"; }
+
+  if command -v opencode >/dev/null 2>&1; then
+    pass opencode "$(opencode --version 2>/dev/null | head -1) [$(command -v opencode)]"
+  else
+    fail opencode "not installed (curl -fsSL https://opencode.ai/v2/install | bash)"
+  fi
+
+  if [ -f "$PLUGIN_DIR/index.ts" ]; then
+    pass plugin "$PLUGIN_DIR/index.ts"
+  else
+    fail plugin "missing (run ./install.sh)"
+  fi
+
+  if [ -f "$CFG" ] && grep -qsF "$PLUGIN_DIR" "$CFG"; then
+    pass config "$CFG"
+  else
+    fail config "plugin entry missing in $CFG (run ./install.sh)"
+  fi
+
+  if [ -f "$CFG" ] && grep -qsF 'token_status' "$CFG" && grep -qsF 'compact_now' "$CFG"; then
+    pass commands "/tokens /compact-now /handoff /resume"
+  else
+    fail commands "missing from $CFG (run ./install.sh)"
+  fi
+
+  if [ -x "$BIN_DIR/oc-auto-reinstall" ] && [ -x "$BIN_DIR/oc-safe-reinstall" ]; then
+    pass helpers "$BIN_DIR"
+  else
+    fail helpers "missing in $BIN_DIR (run ./install.sh)"
+  fi
+
+  if command -v sqlite3 >/dev/null 2>&1; then
+    pass sqlite3 "$(sqlite3 --version 2>/dev/null | cut -d' ' -f1)"
+  else
+    note sqlite3 "missing (raw-copy DB backups will be used)"
+  fi
+
+  if [ -f "$CONFIG_DIR/memory/unlimited-tokens.log" ] && grep -qs 'setup start' "$CONFIG_DIR/memory/unlimited-tokens.log"; then
+    pass runtime "plugin loaded in a session"
+  else
+    note runtime "not loaded yet; open a session and check the log"
+  fi
+
+  if command -v opencode >/dev/null 2>&1 && opencode service status >/dev/null 2>&1; then
+    note service "running; restart it to reload the plugin now"
+  else
+    note service "not running"
+  fi
+
+  printf '\n'
+  if [ "$ok" -eq 1 ]; then
+    say "check passed"
+    return 0
+  fi
+  warn "check found problems (see [!!] lines)"
+  return 1
+}
+
 case "$MODE" in
   install) do_install ;;
   uninstall) do_uninstall ;;
+  check) do_check ;;
   help) usage ;;
 esac
