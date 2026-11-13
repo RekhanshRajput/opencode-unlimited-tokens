@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "compaction": {
+    "auto": false
+  },
+  "plugins": [
+    {
+      "package": "/home/you/.config/opencode/plugins/token-guard",
+      "options": {
+        "warnAt": 0.7,
+        "reinstallAt": 0.85,
+        "compactAt": 0.9,
+        "handoffAt": 0.95,
+        "reinstallScript": "/home/you/.local/bin/oc-auto-reinstall"
+      }
+    }
+  ],
+  "commands": {
+    "handoff": {
+      "description": "Save the current session to a memory file",
+      "template": "Call the `handoff` tool with a short note describing the current task. Then tell me the memory file path and that I can start a new session to continue."
+    },
+    "resume": {
+      "description": "Continue from the latest handoff memory",
+      "template": "Read the file ~/.config/opencode/memory/latest-handoff.md and continue the work described there. First summarize what was in progress and what the next step is."
+    }
+  }
+}

@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# oc-auto-reinstall — hot-swaps the OpenCode binary and frees context without
+# closing the running session.
+#
+# Invoked by the token-guard plugin as:
+#   oc-auto-reinstall --session <sessionID>
+#
+# Default ("hot") mode:
+#   - backs up the SQLite database and verifies integrity first
+#   - waits for the session to be idle (default 10 minutes)
+#   - installs the current version while the service keeps running
+#   - compacts the session so context/tokens are freed
+#   - never stops the service and never closes the TUI
+#
+# Optional --cold mode does a literal uninstall + reinstall and restarts the
+# background service (the TUI will have to be reopened manually).
+#
+# Both modes keep sessions, config, and the SQLite database.
+set -euo pipefail
+umask 077
+
+MEMORY_DIR="$HOME/.config/opencode/memory"
+BACKUP_DIR="$HOME/.config/opencode/backups"
+LOG_FILE="$MEMORY_DIR/reinstall.log"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+DB="$DATA_DIR/opencode.db"
+BIN="$HOME/.opencode/bin/opencode"
+# OpenCode 2 installer (the plain /install URL installs OpenCode 1).
+INSTALLER_URL="https://opencode.ai/v2/install"
+
+SESSION=""
+WAIT_SECONDS=600
+DRY_RUN=0
+MODE="hot"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session) SESSION="${2:-}"; shift 2 ;;
+    --wait) WAIT_SECONDS="${2:-600}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --cold) MODE="cold"; shift ;;
+    --hot) MODE="hot"; shift ;;
+    *) shift ;;
+  esac
+done
+
+mkdir -p "$MEMORY_DIR" "$BACKUP_DIR"
+chmod 700 "$MEMORY_DIR" "$BACKUP_DIR" 2>/dev/null || true
+
+log() {
+  printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG_FILE" >&2
+}
+
+MARKER="$MEMORY_DIR/.reinstall-${SESSION}.json"
+BIN_BACKUP=""
+INSTALLER=""
+
+restore_binary() {
+  [ -n "$BIN_BACKUP" ] && [ -x "$BIN_BACKUP" ] || return 1
+  local tmp="$BIN.restore.$$"
+  mkdir -p "$(dirname "$BIN")"
+  cp "$BIN_BACKUP" "$tmp"
+  chmod 755 "$tmp"
+  mv "$tmp" "$BIN"
+}
+
+cleanup() {
+  local code=$?
+  trap - EXIT
+  rm -f "$MARKER"
+  if [ -n "$INSTALLER" ]; then
+    rm -f "$INSTALLER"
+  fi
+  if [ ! -x "$BIN" ] && [ -n "$BIN_BACKUP" ] && [ -x "$BIN_BACKUP" ]; then
+    log "binary missing at exit; restoring backup binary"
+    restore_binary || true
+  fi
+  if [ "${STOPPED:-0}" -eq 1 ] && [ -x "$BIN" ]; then
+    "$BIN" service start >/dev/null 2>&1 || true
+  fi
+  exit "$code"
+}
+trap cleanup EXIT
+
+count_sessions() {
+  local db="$1"
+  [ -f "$db" ] || { echo "?"; return; }
+  sqlite3 "file:$db?mode=ro&immutable=1" "select count(*) from session_v2;" 2>/dev/null \
+    || sqlite3 "file:$db?mode=ro&immutable=1" "select count(*) from session;" 2>/dev/null \
+    || echo "?"
+}
+
+prune_backups() {
+  ls -1t "$BACKUP_DIR"/opencode-*.db 2>/dev/null | tail -n +4 | xargs -r rm -f
+  ls -1t "$BACKUP_DIR"/config-*.tar.gz 2>/dev/null | tail -n +3 | xargs -r rm -f
+  ls -1t "$BACKUP_DIR"/opencode-bin-* 2>/dev/null | tail -n +2 | xargs -r rm -f
+}
+
+# One reinstall at a time.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$MEMORY_DIR/.reinstall.lock"
+  if ! flock -n 9; then
+    log "another reinstall is already running; exiting"
+    exit 0
+  fi
+fi
+
+log "auto-reinstall start (session=${SESSION:-unknown}, mode=$MODE, dry_run=$DRY_RUN)"
+
+# 1. Wait until no session is running.
+if [ -n "$SESSION" ]; then
+  deadline=$(( $(date +%s) + WAIT_SECONDS ))
+  while :; do
+    active=""
+    if active="$(opencode api get /api/session/active 2>/dev/null)"; then
+      if ! printf '%s' "$active" | grep -q '"running"'; then
+        break
+      fi
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      log "timeout waiting for idle; compacting the session instead of reinstalling"
+      opencode api post "/api/session/$SESSION/compact" -d '{}' >/dev/null 2>&1 || true
+      exit 2
+    fi
+    sleep 10
+  done
+  sleep 5
+  log "session is idle; preparing reinstall"
+fi
+
+# 2. Snapshot sessions database.
+STAMP="$(date +%Y%m%d-%H%M%S)"
+DB_BACKUP="$BACKUP_DIR/opencode-$STAMP.db"
+BEFORE="?"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" ".backup '$DB_BACKUP'"
+  check="$(sqlite3 "file:$DB_BACKUP?mode=ro&immutable=1" "pragma integrity_check;" 2>/dev/null | head -1)"
+  if [ "$check" != "ok" ]; then
+    log "database backup failed integrity check: $check"
+    exit 1
+  fi
+  rm -f "$DB_BACKUP-shm" "$DB_BACKUP-wal"
+  BEFORE="$(count_sessions "$DB_BACKUP")"
+  log "sessions backup ready: $DB_BACKUP ($BEFORE sessions)"
+else
+  log "warning: database not found at $DB"
+fi
+
+# 3. Snapshot config and current binary.
+tar -czf "$BACKUP_DIR/config-$STAMP.tar.gz" --exclude="opencode/backups" -C "$HOME/.config" opencode 2>/dev/null || true
+if [ -x "$BIN" ]; then
+  BIN_BACKUP="$BACKUP_DIR/opencode-bin-$STAMP"
+  cp "$BIN" "$BIN_BACKUP"
+  chmod 700 "$BIN_BACKUP"
+  log "binary backup ready: $BIN_BACKUP"
+fi
+
+# Keep the backup directory from growing without bound.
+prune_backups
+
+# 4. Download the installer while the network is known to be up.
+INSTALLER="$(mktemp)"
+if ! curl -fsSL "$INSTALLER_URL" -o "$INSTALLER"; then
+  log "could not download installer; aborting without touching the install"
+  exit 1
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  log "dry run: backups complete, skipping uninstall/install"
+  exit 0
+fi
+
+# 5. Remember the current version so the plugin API stays compatible.
+VERSION="$("$BIN" --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || true)"
+
+install_release() {
+  local ok=0
+  if [ -n "$VERSION" ]; then
+    log "installing OpenCode $VERSION"
+    if bash "$INSTALLER" --version "$VERSION" --no-modify-path >>"$LOG_FILE" 2>&1; then
+      ok=1
+    fi
+  fi
+  if [ "$ok" -eq 0 ]; then
+    log "versioned install failed; installing latest"
+    if bash "$INSTALLER" --no-modify-path >>"$LOG_FILE" 2>&1; then
+      ok=1
+    fi
+  fi
+  if [ "$ok" -eq 0 ] && [ -n "$BIN_BACKUP" ] && [ -x "$BIN_BACKUP" ]; then
+    log "network install failed; installing from local binary backup"
+    if bash "$INSTALLER" --binary "$BIN_BACKUP" --no-modify-path >>"$LOG_FILE" 2>&1; then
+      ok=1
+    fi
+  fi
+  [ "$ok" -eq 1 ]
+}
+
+STOPPED=0
+
+# 6. Install the new binary.
+if [ "$MODE" = "hot" ]; then
+  # The installer downloads to a temp directory and replaces the binary with a
+  # single atomic move, so the old binary stays available until the swap.
+  log "hot reinstall: service and terminal stay connected"
+  rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/opencode/models.json"
+  if ! install_release; then
+    log "ERROR: install failed; the previous binary is still in place"
+    exit 1
+  fi
+else
+  log "stopping service"
+  "$BIN" service stop >/dev/null 2>&1 || true
+  STOPPED=1
+
+  log "uninstalling OpenCode (sessions, config, and state are kept)"
+  if ! "$BIN" uninstall --force >>"$LOG_FILE" 2>&1; then
+    log "uninstall command failed; aborting"
+    exit 1
+  fi
+
+  if ! install_release; then
+    log "ERROR: install failed"
+    exit 1
+  fi
+fi
+
+if [ ! -x "$BIN" ] || ! "$BIN" --version >/dev/null 2>&1; then
+  log "ERROR: new binary is missing or not runnable; restoring previous binary"
+  rm -f "$BIN"
+  restore_binary || true
+  exit 1
+fi
+
+log "installed version: $("$BIN" --version 2>/dev/null || echo unknown)"
+
+# Never leave an OpenCode 1 binary behind after installing OpenCode 2.
+NEW_VERSION="$("$BIN" --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+if [ -n "$VERSION" ] && [ -n "$NEW_VERSION" ] && [ "${VERSION%%.*}" -ge 2 ] && [ "${NEW_VERSION%%.*}" -lt 2 ]; then
+  log "ERROR: installed OpenCode $NEW_VERSION instead of $VERSION; restoring previous binary"
+  restore_binary || rm -f "$BIN"
+  if [ "$STOPPED" -eq 1 ] && [ -x "$BIN" ]; then
+    "$BIN" service start >/dev/null 2>&1 || true
+  fi
+  exit 1
+fi
+
+# 7. Verify sessions database and restore if anything is wrong.
+AFTER="?"
+if [ -f "$DB" ]; then
+  if ! sqlite3 "file:$DB?mode=ro&immutable=1" "pragma integrity_check;" 2>/dev/null | grep -q '^ok$'; then
+    log "database failed integrity check after reinstall; restoring backup"
+    "$BIN" service stop >/dev/null 2>&1 || true
+    STOPPED=1
+    rm -f "$DB-wal" "$DB-shm"
+    cp "$DB_BACKUP" "$DB"
+  fi
+  AFTER="$(count_sessions "$DB")"
+  if [ "$BEFORE" != "?" ] && [ "$AFTER" != "?" ] && [ "$AFTER" -lt "$BEFORE" ]; then
+    log "session count dropped ($BEFORE -> $AFTER); restoring backup"
+    "$BIN" service stop >/dev/null 2>&1 || true
+    STOPPED=1
+    rm -f "$DB-wal" "$DB-shm"
+    cp "$DB_BACKUP" "$DB"
+    AFTER="$(count_sessions "$DB")"
+  fi
+else
+  log "database missing after reinstall; restoring backup"
+  "$BIN" service stop >/dev/null 2>&1 || true
+  STOPPED=1
+  cp "$DB_BACKUP" "$DB"
+  AFTER="$(count_sessions "$DB")"
+fi
+
+# 8. Finish in the least disruptive way.
+if [ "$MODE" = "hot" ] && [ "$STOPPED" -eq 0 ]; then
+  # Free the context so the same session can continue with fresh tokens.
+  if [ -n "$SESSION" ]; then
+    log "requesting compaction for $SESSION"
+    if "$BIN" api post "/api/session/$SESSION/compact" -d '{}' >>"$LOG_FILE" 2>&1; then
+      log "compaction requested; the session stays open"
+    else
+      log "compaction request failed; the plugin will retry"
+    fi
+  fi
+else
+  log "starting service"
+  "$BIN" service start >>"$LOG_FILE" 2>&1 || true
+fi
+
+# Remember that this session was already reinstalled so the plugin does not
+# trigger again immediately when the same session is reopened.
+if [ -n "$SESSION" ]; then
+  printf '%s' "$(date +%s)" > "$MEMORY_DIR/.reinstall-done-$SESSION"
+  chmod 600 "$MEMORY_DIR/.reinstall-done-$SESSION" 2>/dev/null || true
+  rm -f "$MEMORY_DIR/.lock-reinstall-$SESSION"
+fi
+
+if [ "$MODE" = "hot" ] && [ "$STOPPED" -eq 0 ]; then
+  log "hot reinstall complete (sessions: $BEFORE -> $AFTER); session left open"
+else
+  log "cold reinstall complete (sessions: $BEFORE -> $AFTER)"
+  log "reopen OpenCode and run /resume to load latest-handoff.md"
+fi

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# oc-safe-reinstall — reinstall OpenCode without losing sessions, config, or state.
+# Sessions live in a SQLite database, not in the binary. This script snapshots
+# that database first, then upgrades/reinstalls the binary, then verifies it.
+set -euo pipefail
+umask 077
+
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+DB="$DATA_DIR/opencode.db"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+BACKUP_DIR="$CONFIG_DIR/backups"
+
+say() { printf '%s\n' "$*"; }
+
+count_sessions() {
+  local db="$1"
+  [ -f "$db" ] || { echo "?"; return; }
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "file:$db?mode=ro" "select count(*) from session_v2;" 2>/dev/null \
+      || sqlite3 "file:$db?mode=ro" "select count(*) from session;" 2>/dev/null \
+      || echo "?"
+  else
+    echo "?"
+  fi
+}
+
+backup_db() {
+  [ -f "$DB" ] || { say "ERROR: no database at $DB"; exit 1; }
+  mkdir -p "$BACKUP_DIR"
+
+  local stamp file
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  file="$BACKUP_DIR/opencode-$stamp.db"
+
+  say "Backing up sessions database..."
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$DB" ".backup '$file'"
+  else
+    cp "$DB" "$file"
+    [ -f "$DB-wal" ] && cp "$DB-wal" "$file-wal" || true
+    [ -f "$DB-shm" ] && cp "$DB-shm" "$file-shm" || true
+  fi
+
+  if command -v sqlite3 >/dev/null 2>&1; then
+    local check
+    check="$(sqlite3 "file:$file?mode=ro&immutable=1" "pragma integrity_check;" 2>/dev/null | head -1)"
+    [ "$check" = "ok" ] || { say "ERROR: backup failed integrity check: $check"; exit 1; }
+  fi
+
+  say "Backup ready: $file"
+  say "Sessions in backup: $(count_sessions "$file")"
+  rm -f "$file-shm" "$file-wal"
+  LAST_BACKUP="$file"
+}
+
+restore_db() {
+  local source="${1:-}"
+  [ -n "$source" ] || { say "Usage: oc-safe-reinstall restore <backup.db>"; exit 1; }
+  [ -f "$source" ] || { say "ERROR: backup not found: $source"; exit 1; }
+
+  say "Stopping OpenCode background service..."
+  opencode service stop >/dev/null 2>&1 || true
+  mkdir -p "$DATA_DIR"
+  cp "$source" "$DB"
+  rm -f "$DB-wal" "$DB-shm"
+  say "Restored database from: $source"
+  say "Sessions now: $(count_sessions "$DB")"
+  say "Start OpenCode again with: opencode service start"
+}
+
+reinstall() {
+  local assume_yes="${1:-}"
+  backup_db
+
+  if [ "$assume_yes" != "--yes" ]; then
+    say ""
+    say "This will reinstall the OpenCode binary with: opencode upgrade --method curl"
+    say "Sessions, config, and state are kept. Your backup is at: $LAST_BACKUP"
+    printf "Proceed? [y/N] "
+    read -r answer
+    case "$answer" in
+      y|Y|yes|YES) ;;
+      *) say "Cancelled."; exit 0 ;;
+    esac
+  fi
+
+  say ""
+  say "Reinstalling OpenCode..."
+  opencode upgrade --method curl
+
+  [ -f "$DB" ] || { say "ERROR: database is missing after reinstall. Restore with: oc-safe-reinstall restore '$LAST_BACKUP'"; exit 1; }
+  say "Sessions after reinstall: $(count_sessions "$DB")"
+  say ""
+  say "Done. Remember: reinstalling does not reset model context."
+  say "Use the /handoff command and then start a new session to continue with fresh tokens."
+}
+
+case "${1:-reinstall}" in
+  backup|--backup-only)
+    backup_db
+    ;;
+  restore|--restore)
+    restore_db "${2:-}"
+    ;;
+  reinstall|--reinstall)
+    reinstall "${2:-}"
+    ;;
+  -h|--help|help)
+    say "Usage:"
+    say "  oc-safe-reinstall                 # backup, then reinstall the binary"
+    say "  oc-safe-reinstall backup          # only snapshot the sessions database"
+    say "  oc-safe-reinstall restore FILE    # restore a snapshot (stops the service)"
+    ;;
+  *)
+    say "Unknown option: $1"
+    say "Run: oc-safe-reinstall --help"
+    exit 1
+    ;;
+esac

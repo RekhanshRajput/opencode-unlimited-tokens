@@ -1,0 +1,22 @@
+# Runtime state
+memory/
+backups/
+
+# Logs and databases
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# Handoffs and plugin markers
+latest-handoff.md
+handoff-*.md
+.reinstall-*
+.lock-*
+
+# Local machine config
+service.json
+
+# Node
+node_modules/
+npm-debug.log*
