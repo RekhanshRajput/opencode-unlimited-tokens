@@ -15,7 +15,7 @@
 
 ![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos-black?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-00ff88?style=flat-square)
-![status](https://img.shields.io/badge/status-armed-ff0044?style=flat-square)
+![setup](https://img.shields.io/badge/setup-one%20command-ff0044?style=flat-square)
 ![tokens](https://img.shields.io/badge/tokens-unlimited-9d00ff?style=flat-square)
 
 OpenCode plugin that watches the context budget and **auto-dumps a handoff +
@@ -30,30 +30,45 @@ No closed session, no lost work, no manual `/compact` spam.
 sitrep
   plugin      context watchdog, fires on session.step.ended
   trigger     70% warn | 85% handoff + reinstall hook | 90% compact | 95% snapshot
+  commands    /tokens  /compact-now  /handoff  /resume
+  install     one command. config patched, PATH fixed, service restarted.
   damage      none. sessions, DB, config, history stay on disk
-  mode        hot. TUI + service keep running
 ```
 
-## [ 01 ] INSTALL
+## [ 01 ] INSTALL — one command, zero edits
 
 ```bash
-git clone https://github.com/<you>/opencode-unlimited-tokens.git
+curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-tokens/main/bootstrap.sh | bash
+```
+
+That single line:
+
+1. pulls the latest repo tarball (no `git` needed),
+2. installs the plugin + both helpers,
+3. backs up and patches `~/.config/opencode/opencode.json` (thresholds + all commands),
+4. adds `~/.local/bin` to your shell rc if it is missing,
+5. restarts the OpenCode background service so the plugin is live immediately.
+
+Reload in place, skip the restart: append `-s -- --no-restart`:
+
+```bash
+curl -fsSL .../bootstrap.sh | bash -s -- --no-restart
+```
+
+Manual clone (same result):
+
+```bash
+git clone https://github.com/RekhanshRajput/opencode-unlimited-tokens.git
 cd opencode-unlimited-tokens
-chmod +x install.sh
 ./install.sh
 ```
 
-Then restart OpenCode / open a fresh session.
-
-Dependencies: `bash`, `curl`, `sqlite3`, `node`. Optional: `flock`.
-
-The installer drops the plugin, ships two helpers to `~/.local/bin`, and patches
-`~/.config/opencode/opencode.json` (timestamped `.bak` first). Existing
-`plugins/token-guard` installs are migrated, never duplicated.
+Requirements: `curl` + `tar`. `sqlite3` is optional (raw-copy DB fallback), and
+one of `python3` / `node` is used to merge JSON — no manual editing either way.
 
 ## [ 02 ] LOADOUT
 
-`~/.config/opencode/opencode.json`:
+The installer writes this for you:
 
 ```json
 {
@@ -102,9 +117,14 @@ Budget source: `limit.input`, else `limit.context - limit.output`, else
 
 ## [ 04 ] COMMANDS
 
-- `/handoff` — write the transcript to `~/.config/opencode/memory/latest-handoff.md`
-- `/resume` — new session, read that file, continue where you left off
-- `handoff` tool — same thing, callable by the model before long jobs
+| command | what happens |
+| --- | --- |
+| `/tokens` | prints used / budget / % / thresholds |
+| `/compact-now` | handoff + compaction, right now |
+| `/handoff` | write `memory/latest-handoff.md` |
+| `/resume` | new session reads that file and continues |
+
+Tools registered for the model: `token_status`, `compact_now`, `handoff`.
 
 Manual helpers:
 
@@ -156,10 +176,11 @@ version check, corrupt DB, or dropped session count.
 
 | path | what lives there |
 | --- | --- |
-| `plugin/index.ts` | event loop, ratio math, locks, handoff writer, reinstall spawn |
+| `bootstrap.sh` | one-liner remote installer (tarball, no git) |
+| `install.sh` | install / uninstall, config merge, PATH, service restart |
+| `plugin/index.ts` | event loop, ratio math, locks, handoff writer, tools |
 | `bin/oc-auto-reinstall` | detached hot/cold reinstall + backup + compaction |
 | `bin/oc-safe-reinstall` | manual snapshot / restore / reinstall |
-| `install.sh` | install, uninstall, config merge, legacy migration |
 | `README.md` | this file |
 | `.gitignore` | keeps logs, DB, handoffs, markers out of git |
 
@@ -194,9 +215,10 @@ backups/                        DB + config + binary snapshots
 ./install.sh --uninstall
 ```
 
-Removes plugin + helpers and the config entry. Logs, handoffs, and backups stay
-in `~/.config/opencode/memory/` and `~/.config/opencode/backups/`. `compaction.auto`
-is left `false`; set it `true` for built-in compaction again.
+Removes plugin, helpers, the plugin entry, and the four commands. Logs,
+handoffs, and backups stay in `~/.config/opencode/memory/` and
+`~/.config/opencode/backups/`. `compaction.auto` is left `false`; set it `true`
+for built-in compaction again.
 
 ## [ 09 ] LICENSE
 

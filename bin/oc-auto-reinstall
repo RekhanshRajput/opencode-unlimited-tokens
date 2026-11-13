@@ -133,13 +133,21 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 DB_BACKUP="$BACKUP_DIR/opencode-$STAMP.db"
 BEFORE="?"
 if [ -f "$DB" ]; then
-  sqlite3 "$DB" ".backup '$DB_BACKUP'"
-  check="$(sqlite3 "file:$DB_BACKUP?mode=ro&immutable=1" "pragma integrity_check;" 2>/dev/null | head -1)"
-  if [ "$check" != "ok" ]; then
-    log "database backup failed integrity check: $check"
-    exit 1
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$DB" ".backup '$DB_BACKUP'"
+    check="$(sqlite3 "file:$DB_BACKUP?mode=ro&immutable=1" "pragma integrity_check;" 2>/dev/null | head -1)"
+    if [ "$check" != "ok" ]; then
+      log "database backup failed integrity check: $check"
+      exit 1
+    fi
+    rm -f "$DB_BACKUP-shm" "$DB_BACKUP-wal"
+  else
+    # No sqlite3: raw copy including the WAL so the snapshot stays usable.
+    log "sqlite3 missing; raw-copying the database (no integrity check)"
+    cp "$DB" "$DB_BACKUP"
+    if [ -f "$DB-wal" ]; then cp "$DB-wal" "$DB_BACKUP-wal"; fi
+    if [ -f "$DB-shm" ]; then cp "$DB-shm" "$DB_BACKUP-shm"; fi
   fi
-  rm -f "$DB_BACKUP-shm" "$DB_BACKUP-wal"
   BEFORE="$(count_sessions "$DB_BACKUP")"
   log "sessions backup ready: $DB_BACKUP ($BEFORE sessions)"
 else
@@ -248,7 +256,8 @@ fi
 # 7. Verify sessions database and restore if anything is wrong.
 AFTER="?"
 if [ -f "$DB" ]; then
-  if ! sqlite3 "file:$DB?mode=ro&immutable=1" "pragma integrity_check;" 2>/dev/null | grep -q '^ok$'; then
+  if command -v sqlite3 >/dev/null 2>&1 &&
+    ! sqlite3 "file:$DB?mode=ro&immutable=1" "pragma integrity_check;" 2>/dev/null | grep -q '^ok$'; then
     log "database failed integrity check after reinstall; restoring backup"
     "$BIN" service stop >/dev/null 2>&1 || true
     STOPPED=1

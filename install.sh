@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────
 #  OPENCODE UNLIMITED TOKENS
-#  install / uninstall
+#  zero-touch installer
+#    ./install.sh            install everything + restart service
+#    ./install.sh --no-restart
+#    ./install.sh --uninstall
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -11,53 +14,194 @@ PLUGIN_DIR="$CONFIG_DIR/plugins/opencode-unlimited-tokens"
 OLD_PLUGIN_DIR="$CONFIG_DIR/plugins/token-guard"
 BIN_DIR="$HOME/.local/bin"
 CFG="$CONFIG_DIR/opencode.json"
+RESTART=1
+MODE="install"
+
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall|-u) MODE="uninstall" ;;
+    --no-restart) RESTART=0 ;;
+    --restart) RESTART=1 ;;
+    --help|-h) MODE="help" ;;
+    *) printf '\033[0;31m[x]\033[0m unknown option: %s\n' "$arg" >&2; exit 1 ;;
+  esac
+done
 
 say()  { printf '\033[0;36m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[0;33m[!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[0;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  cat <<EOF
+  cat <<'EOF'
 opencode-unlimited-tokens
 
-  ./install.sh              install plugin + helpers
-  ./install.sh --uninstall  remove plugin + helpers
-  ./install.sh --help       this text
+  ./install.sh               install + patch config + restart opencode service
+  ./install.sh --no-restart  install without touching the running service
+  ./install.sh --uninstall   remove plugin, helpers, commands
 EOF
 }
 
-merge_config() {
-  local mode="$1" merge_script
-  merge_script="$(mktemp)"
-  cat >"$merge_script" <<'NODE'
-const fs = require("fs")
-const [mode, cfgPath, pluginPath, oldPluginPath, scriptPath] = process.argv.slice(2)
-
-let cfg = {}
-if (fs.existsSync(cfgPath)) {
-  const raw = fs.readFileSync(cfgPath, "utf8").trim()
-  cfg = raw ? JSON.parse(raw) : {}
+ensure_path() {
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) return 0 ;;
+  esac
+  local marker='# opencode-unlimited-tokens: local helpers'
+  local line='export PATH="$HOME/.local/bin:$PATH"'
+  local rc
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [ -f "$rc" ] || continue
+    grep -qsF "$marker" "$rc" && continue
+    printf '\n%s\n%s\n' "$marker" "$line" >>"$rc"
+    say "PATH updated in $rc"
+  done
 }
 
-const pkg = (entry) => (typeof entry === "string" ? entry : entry && entry.package)
+restart_opencode() {
+  command -v opencode >/dev/null 2>&1 || return 0
+  if ! opencode service status >/dev/null 2>&1; then
+    say "no background service running; plugin loads with the next session"
+    return 0
+  fi
+  say "restarting opencode service to load the plugin"
+  opencode service restart >/dev/null 2>&1 || {
+    opencode service stop >/dev/null 2>&1 || true
+    sleep 1
+    opencode service start >/dev/null 2>&1 || true
+  }
+}
+
+merge_config() {
+  local mode="$1"
+  if command -v python3 >/dev/null 2>&1; then
+  python3 - "$mode" "$CFG" "$PLUGIN_DIR" "$OLD_PLUGIN_DIR" "$BIN_DIR/oc-auto-reinstall" <<'PY'
+import json, os, sys
+
+mode, cfg_path, plugin_path, old_path, script_path = sys.argv[1:6]
+
+cfg = {}
+if os.path.exists(cfg_path):
+    raw = open(cfg_path, encoding="utf-8").read().strip()
+    cfg = json.loads(raw) if raw else {}
+
+
+def pkg(entry):
+    if isinstance(entry, str):
+        return entry
+    return (entry or {}).get("package")
+
+
+if mode == "uninstall":
+    if isinstance(cfg.get("plugins"), list):
+        cfg["plugins"] = [e for e in cfg["plugins"] if pkg(e) not in (plugin_path, old_path)]
+        if not cfg["plugins"]:
+            del cfg["plugins"]
+    commands = cfg.get("commands")
+    if isinstance(commands, dict):
+        def ours(name, marker):
+            cmd = commands.get(name)
+            return isinstance(cmd, dict) and marker in str(cmd.get("template", ""))
+
+        if ours("handoff", "`handoff` tool"):
+            del commands["handoff"]
+        if ours("resume", "latest-handoff.md"):
+            del commands["resume"]
+        if ours("tokens", "`token_status` tool"):
+            del commands["tokens"]
+        if ours("compact-now", "`compact_now` tool"):
+            del commands["compact-now"]
+        if not commands:
+            del cfg["commands"]
+else:
+    cfg["compaction"] = {**(cfg.get("compaction") or {}), "auto": False}
+    plugins = cfg.get("plugins")
+    plugins = plugins if isinstance(plugins, list) else []
+    plugins = [e for e in plugins if pkg(e) != old_path]
+
+    options = {
+        "warnAt": 0.7,
+        "reinstallAt": 0.85,
+        "compactAt": 0.9,
+        "handoffAt": 0.95,
+        "reinstallScript": script_path,
+    }
+    index = next((i for i, e in enumerate(plugins) if pkg(e) == plugin_path), None)
+    if index is None:
+        plugins.append({"package": plugin_path, "options": options})
+    else:
+        entry = plugins[index]
+        if isinstance(entry, str):
+            plugins[index] = {"package": plugin_path, "options": options}
+        else:
+            entry["options"] = {**options, **(entry.get("options") or {}), "reinstallScript": script_path}
+    cfg["plugins"] = plugins
+
+    commands = cfg.get("commands") if isinstance(cfg.get("commands"), dict) else {}
+    commands.setdefault(
+        "handoff",
+        {
+            "description": "Save the current session to a memory file",
+            "template": "Call the `handoff` tool with a short note describing the current task. Then tell me the memory file path and that I can start a new session to continue.",
+        },
+    )
+    commands.setdefault(
+        "resume",
+        {
+            "description": "Continue from the latest handoff memory",
+            "template": "Read the file ~/.config/opencode/memory/latest-handoff.md and continue the work described there. First summarize what was in progress and what the next step is.",
+        },
+    )
+    commands.setdefault(
+        "tokens",
+        {
+            "description": "Show context usage and remaining budget",
+            "template": "Call the `token_status` tool and show me the exact output. If usage is above the compact threshold, ask before compacting.",
+        },
+    )
+    commands.setdefault(
+        "compact-now",
+        {
+            "description": "Compact this session immediately",
+            "template": "Call the `compact_now` tool and confirm when the compaction was requested.",
+        },
+    )
+    cfg["commands"] = commands
+
+with open(cfg_path, "w", encoding="utf-8") as handle:
+    json.dump(cfg, handle, indent=2)
+    handle.write("\n")
+PY
+  elif command -v node >/dev/null 2>&1; then
+  node - "$mode" "$CFG" "$PLUGIN_DIR" "$OLD_PLUGIN_DIR" "$BIN_DIR/oc-auto-reinstall" <<'JS'
+const fs = require("fs")
+const [mode, cfgPath, pluginPath, oldPath, scriptPath] = process.argv.slice(2)
+const pkg = (e) => (typeof e === "string" ? e : e && e.package)
+const cfg = fs.existsSync(cfgPath)
+  ? (() => {
+      const raw = fs.readFileSync(cfgPath, "utf8").trim()
+      return raw ? JSON.parse(raw) : {}
+    })()
+  : {}
+
+const commands = cfg.commands && typeof cfg.commands === "object" ? cfg.commands : {}
 
 if (mode === "uninstall") {
   if (Array.isArray(cfg.plugins)) {
-    cfg.plugins = cfg.plugins.filter((e) => pkg(e) !== pluginPath && pkg(e) !== oldPluginPath)
-    if (cfg.plugins.length === 0) delete cfg.plugins
+    cfg.plugins = cfg.plugins.filter((e) => pkg(e) !== pluginPath && pkg(e) !== oldPath)
+    if (!cfg.plugins.length) delete cfg.plugins
   }
-  if (cfg.commands && typeof cfg.commands === "object") {
-    const ours = (cmd, marker) => cmd && typeof cmd.template === "string" && cmd.template.includes(marker)
-    if (ours(cfg.commands.handoff, "`handoff` tool")) delete cfg.commands.handoff
-    if (ours(cfg.commands.resume, "latest-handoff.md")) delete cfg.commands.resume
-    if (Object.keys(cfg.commands).length === 0) delete cfg.commands
+  const ours = (name, marker) => {
+    const cmd = commands[name]
+    return cmd && typeof cmd.template === "string" && cmd.template.includes(marker)
   }
+  if (ours("handoff", "`handoff` tool")) delete commands.handoff
+  if (ours("resume", "latest-handoff.md")) delete commands.resume
+  if (ours("tokens", "`token_status` tool")) delete commands.tokens
+  if (ours("compact-now", "`compact_now` tool")) delete commands["compact-now"]
+  if (Object.keys(commands).length) cfg.commands = commands
+  else delete cfg.commands
 } else {
   cfg.compaction = { ...(cfg.compaction || {}), auto: false }
-  cfg.plugins = Array.isArray(cfg.plugins) ? cfg.plugins : []
-  // drop the pre-rebrand entry so the plugin never loads twice
-  cfg.plugins = cfg.plugins.filter((e) => pkg(e) !== oldPluginPath)
-
+  const plugins = (Array.isArray(cfg.plugins) ? cfg.plugins : []).filter((e) => pkg(e) !== oldPath)
   const options = {
     warnAt: 0.7,
     reinstallAt: 0.85,
@@ -65,43 +209,49 @@ if (mode === "uninstall") {
     handoffAt: 0.95,
     reinstallScript: scriptPath,
   }
-  const index = cfg.plugins.findIndex((e) => pkg(e) === pluginPath)
-  if (index >= 0) {
-    const entry = cfg.plugins[index]
-    if (typeof entry === "string") cfg.plugins[index] = { package: pluginPath, options }
-    else entry.options = { ...options, ...(entry.options || {}), reinstallScript: scriptPath }
-  } else {
-    cfg.plugins.push({ package: pluginPath, options })
-  }
+  const index = plugins.findIndex((e) => pkg(e) === pluginPath)
+  if (index === -1) plugins.push({ package: pluginPath, options })
+  else if (typeof plugins[index] === "string") plugins[index] = { package: pluginPath, options }
+  else plugins[index].options = { ...options, ...(plugins[index].options || {}), reinstallScript: scriptPath }
+  cfg.plugins = plugins
 
-  cfg.commands = { ...(cfg.commands || {}) }
-  cfg.commands.handoff = cfg.commands.handoff || {
+  commands.handoff = commands.handoff || {
     description: "Save the current session to a memory file",
     template:
       "Call the `handoff` tool with a short note describing the current task. Then tell me the memory file path and that I can start a new session to continue.",
   }
-  cfg.commands.resume = cfg.commands.resume || {
+  commands.resume = commands.resume || {
     description: "Continue from the latest handoff memory",
     template:
       "Read the file ~/.config/opencode/memory/latest-handoff.md and continue the work described there. First summarize what was in progress and what the next step is.",
   }
+  commands.tokens = commands.tokens || {
+    description: "Show context usage and remaining budget",
+    template:
+      "Call the `token_status` tool and show me the exact output. If usage is above the compact threshold, ask before compacting.",
+  }
+  commands["compact-now"] = commands["compact-now"] || {
+    description: "Compact this session immediately",
+    template: "Call the `compact_now` tool and confirm when the compaction was requested.",
+  }
+  cfg.commands = commands
 }
 
 fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n")
-NODE
-  node "$merge_script" "$mode" "$CFG" "$PLUGIN_DIR" "$OLD_PLUGIN_DIR" "$BIN_DIR/oc-auto-reinstall"
-  rm -f "$merge_script"
+JS
+  else
+    warn "node/python3 not found; patch $CFG by hand"
+    return 1
+  fi
 }
 
 do_install() {
-  command -v opencode >/dev/null 2>&1 || warn "opencode not in PATH"
-  for tool in sqlite3 curl node; do
-    command -v "$tool" >/dev/null 2>&1 || warn "$tool missing"
-  done
+  command -v opencode >/dev/null 2>&1 || warn "opencode not in PATH (install it first)"
+  command -v curl >/dev/null 2>&1 || warn "curl missing (needed by the reinstall helper)"
+  command -v sqlite3 >/dev/null 2>&1 || warn "sqlite3 missing (raw-copy backup fallback will be used)"
 
   say "payload -> $PLUGIN_DIR"
   mkdir -p "$CONFIG_DIR" "$BIN_DIR"
-  # migrate the pre-rebrand install instead of leaving a second copy behind
   if [ -d "$OLD_PLUGIN_DIR" ] && [ ! -d "$PLUGIN_DIR" ]; then
     mv "$OLD_PLUGIN_DIR" "$PLUGIN_DIR"
     say "migrated old plugin dir"
@@ -112,46 +262,49 @@ do_install() {
   say "helpers -> $BIN_DIR"
   install -m 755 "$REPO_DIR/bin/oc-auto-reinstall" "$BIN_DIR/oc-auto-reinstall"
   install -m 755 "$REPO_DIR/bin/oc-safe-reinstall" "$BIN_DIR/oc-safe-reinstall"
-
-  case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) warn "$BIN_DIR is not in PATH" ;;
-  esac
+  ensure_path
 
   if [ -f "$CFG" ]; then
     cp "$CFG" "$CFG.bak.$(date +%Y%m%d-%H%M%S)"
     say "config backed up"
   fi
-  merge_config install
+  merge_config install || true
   say "config patched -> $CFG"
 
+  if [ "$RESTART" -eq 1 ]; then
+    restart_opencode
+  else
+    say "skipped service restart (--no-restart)"
+  fi
+
   printf '\n'
-  say "armed. restart opencode / open a new session."
-  say "log: $CONFIG_DIR/memory/unlimited-tokens.log"
-  warn "set reinstallAt: 0 in $CFG for compaction only"
+  say "armed. log: $CONFIG_DIR/memory/unlimited-tokens.log"
+  say "commands: /tokens  /compact-now  /handoff  /resume"
+  warn "reinstallAt defaults to 0.85; set it to 0 for compaction-only (no binary swap)"
 }
 
 do_uninstall() {
   rm -rf "$PLUGIN_DIR" "$OLD_PLUGIN_DIR"
   say "plugin removed"
+  local f
   for f in "$BIN_DIR/oc-auto-reinstall" "$BIN_DIR/oc-safe-reinstall"; do
     if [ -e "$f" ]; then
       rm -f "$f"
       say "removed $f"
     fi
   done
-  if [ -f "$CFG" ] && command -v node >/dev/null 2>&1; then
+  if [ -f "$CFG" ]; then
     cp "$CFG" "$CFG.bak.$(date +%Y%m%d-%H%M%S)"
-    merge_config uninstall
+    merge_config uninstall || true
     say "config cleaned -> $CFG"
   fi
   say "kept: $CONFIG_DIR/memory/ and $CONFIG_DIR/backups/"
   warn "compaction.auto is still false; set it true for built-in compaction"
+  [ "$RESTART" -eq 1 ] && restart_opencode
 }
 
-case "${1:-install}" in
-  install|--install|"") do_install ;;
-  uninstall|--uninstall|-u) do_uninstall ;;
-  -h|--help|help) usage ;;
-  *) die "unknown option: $1 (try --help)" ;;
+case "$MODE" in
+  install) do_install ;;
+  uninstall) do_uninstall ;;
+  help) usage ;;
 esac

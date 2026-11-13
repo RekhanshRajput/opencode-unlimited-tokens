@@ -232,6 +232,25 @@ export default {
     const lastWarn = new Map<string, number>()
     const lastHandoff = new Map<string, number>()
     const lastReinstall = new Map<string, number>()
+    // last known usage per session, read by the token_status tool
+    const usage = new Map<string, { used: number; limit: number; ratio: number; at: number }>()
+
+    const formatUsage = (sessionID: string, used?: number, limit?: number) => {
+      const last = usage.get(sessionID)
+      const budget = limit ?? last?.limit ?? options.inputLimit
+      const spent = used ?? last?.used
+      const ratioValue = spent === undefined ? undefined : spent / budget
+      const lines = [
+        spent === undefined
+          ? `context: no step measured yet (budget ${budget.toLocaleString()})`
+          : `context: ${spent.toLocaleString()} / ${budget.toLocaleString()} (${(ratioValue! * 100).toFixed(1)}%)`,
+        `thresholds: warn ${(options.warnAt * 100).toFixed(0)}% | compact ${(options.compactAt * 100).toFixed(0)}% | handoff ${(options.handoffAt * 100).toFixed(0)}%` +
+          (reinstallAt > 0 ? ` | reinstall ${(reinstallAt * 100).toFixed(0)}%` : " | reinstall off"),
+      ]
+      if (compacting.has(sessionID)) lines.push("state: compaction in progress")
+      else if (last?.at && now() - last.at > 300_000) lines.push("state: stale (no recent step)")
+      return lines.join("\n")
+    }
 
     await ctx.tool.transform((editor: any) => {
       editor.add({
@@ -251,6 +270,43 @@ export default {
           await log(`handoff tool wrote ${file}`)
           return {
             content: `Handoff saved to ${file}. Start a new session and reference this file (or the latest-handoff.md copy) to continue.`,
+          }
+        },
+      })
+
+      editor.add({
+        name: "token_status",
+        description:
+          "Report current context usage for this session: used tokens, model input budget, percentage, thresholds, and compaction state.",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: false },
+        execute: async (_input: any, context: any) => {
+          const sessionID = context.sessionID
+          const limit = await inputLimit(ctx, sessionID)
+          return { content: formatUsage(sessionID, usage.get(sessionID)?.used, limit) }
+        },
+      })
+
+      editor.add({
+        name: "compact_now",
+        description:
+          "Save a handoff and compact this session immediately, freeing context without closing it.",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        options: { codemode: false },
+        execute: async (_input: any, context: any) => {
+          const sessionID = context.sessionID
+          if (compacting.has(sessionID)) return { content: "Compaction is already running for this session." }
+          const file = await writeHandoff(ctx, sessionID, "manual: compact_now tool").catch(() => "")
+          try {
+            await ctx.session.compact({ sessionID })
+            await log(`manual compaction requested for ${sessionID}`)
+            return {
+              content:
+                `Compaction requested for this session.` + (file ? ` Handoff saved to ${file}.` : ""),
+            }
+          } catch (error) {
+            await log(`manual compaction failed for ${sessionID}: ${String(error)}`)
+            return { content: `Compaction failed: ${String(error)}` }
           }
         },
       })
@@ -287,6 +343,7 @@ export default {
 
           const limit = await inputLimit(ctx, sessionID)
           const ratio = used / limit
+          usage.set(sessionID, { used, limit, ratio, at: now() })
           if (options.verbose || ratio >= options.warnAt) {
             await log(`usage ${sessionID} ${used}/${limit} (${(ratio * 100).toFixed(1)}%)`)
           }
