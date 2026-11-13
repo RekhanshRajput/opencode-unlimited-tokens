@@ -16,6 +16,7 @@ handoff-*.md
 
 # Local machine config
 service.json
+*.bak.*
 
 # Node
 node_modules/

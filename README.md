@@ -1,49 +1,57 @@
-# token-guard
+<div align="center">
 
-An [OpenCode](https://opencode.ai) plugin that watches model context usage and
-keeps a session alive when the token budget fills up.
+```
+ ██████╗ ██████╗ ███████╗███╗   ██╗ ██████╗ ██████╗ ██████╗ ███████╗
+██╔═══██╗██╔══██╗██╔════╝████╗  ██║██╔════╝██╔═══██╗██╔══██╗██╔════╝
+██║   ██║██████╔╝█████╗  ██╔██╗ ██║██║     ██║   ██║██║  ██║█████╗
+██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██║     ██║   ██║██║  ██║██╔══╝
+╚██████╔╝██║     ███████╗██║ ╚████║╚██████╗╚██████╔╝██████╔╝███████╗
+ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
 
-After every step it checks how much of the model's input budget is used and
-reacts automatically:
+        U N L I M I T E D   T O K E N S
+```
 
-| Usage | Action |
-| --- | --- |
-| 70% | warning in the activity log |
-| 85% | saves a handoff transcript + schedules a hot binary reinstall (optional) |
-| 90% | compacts the session (fallback, and the main recovery path) |
-| 95% | extra handoff snapshot |
+**`> context full? never heard of her.`**
 
-Sessions, history, config, and the SQLite database are **never deleted**. The
-running session is never closed in the default hot mode.
+![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos-black?style=flat-square)
+![license](https://img.shields.io/badge/license-MIT-00ff88?style=flat-square)
+![status](https://img.shields.io/badge/status-armed-ff0044?style=flat-square)
+![tokens](https://img.shields.io/badge/tokens-unlimited-9d00ff?style=flat-square)
 
-## Requirements
+OpenCode plugin that watches the context budget and **auto-dumps a handoff +
+compacts the session** before the model chokes on its own history.
+No closed session, no lost work, no manual `/compact` spam.
 
-- OpenCode 2.x
-- `bash`, `curl`, `sqlite3`
-- `node` (only used by the installer to merge JSON config)
-- `flock` (optional, prevents two reinstalls at once)
+</div>
 
-## Install
+---
 
-```sh
-git clone <your-repo-url> token-guard
-cd token-guard
+```txt
+sitrep
+  plugin      context watchdog, fires on session.step.ended
+  trigger     70% warn | 85% handoff + reinstall hook | 90% compact | 95% snapshot
+  damage      none. sessions, DB, config, history stay on disk
+  mode        hot. TUI + service keep running
+```
+
+## [ 01 ] INSTALL
+
+```bash
+git clone https://github.com/<you>/opencode-unlimited-tokens.git
+cd opencode-unlimited-tokens
 chmod +x install.sh
 ./install.sh
 ```
 
-The installer:
+Then restart OpenCode / open a fresh session.
 
-1. Copies the plugin to `~/.config/opencode/plugins/token-guard/`.
-2. Copies `oc-auto-reinstall` and `oc-safe-reinstall` to `~/.local/bin/`.
-3. Merges the plugin entry and the `/handoff` + `/resume` commands into
-   `~/.config/opencode/opencode.json` (a timestamped `.bak` is written first).
-4. Sets `compaction.auto` to `false`, so OpenCode and this plugin do not both
-   try to compact the same session.
+Dependencies: `bash`, `curl`, `sqlite3`, `node`. Optional: `flock`.
 
-Restart OpenCode (or open a new session) to load the plugin.
+The installer drops the plugin, ships two helpers to `~/.local/bin`, and patches
+`~/.config/opencode/opencode.json` (timestamped `.bak` first). Existing
+`plugins/token-guard` installs are migrated, never duplicated.
 
-## Configuration
+## [ 02 ] LOADOUT
 
 `~/.config/opencode/opencode.json`:
 
@@ -52,7 +60,7 @@ Restart OpenCode (or open a new session) to load the plugin.
   "compaction": { "auto": false },
   "plugins": [
     {
-      "package": "/home/you/.config/opencode/plugins/token-guard",
+      "package": "/home/you/.config/opencode/plugins/opencode-unlimited-tokens",
       "options": {
         "warnAt": 0.7,
         "reinstallAt": 0.85,
@@ -65,143 +73,132 @@ Restart OpenCode (or open a new session) to load the plugin.
 }
 ```
 
-Use an absolute `package` path. The installer fills in your real home directory.
+`compaction.auto: false` is **required** — otherwise OpenCode's built-in
+compaction fights the plugin for the same session.
 
-### Options
-
-| Option | Default | Meaning |
+| option | default | job |
 | --- | --- | --- |
-| `warnAt` | `0.75` | log a warning at this ratio |
-| `compactAt` | `0.85` | request session compaction at this ratio |
-| `handoffAt` | `0.95` | write an extra handoff snapshot |
-| `inputLimit` | `160000` | fallback input budget when the model does not report one |
-| `reinstallAt` | `0` (off) | schedule `oc-auto-reinstall` at this ratio |
-| `reinstallScript` | `~/.local/bin/oc-auto-reinstall` | helper to run |
-| `cooldownMs` | `120000` | minimum gap between compact/handoff actions |
-| `warnCooldownMs` | `300000` | minimum gap between warnings |
-| `handoffMaxChars` | `16000` | transcript tail kept in a handoff file |
-| `reinstallCooldownMs` | `86400000` | do not reinstall the same session twice in 24h |
-| `verbose` | `false` | log usage even below `warnAt` |
+| `warnAt` | `0.75` | log a warning |
+| `compactAt` | `0.85` | fire `session.compact()` |
+| `handoffAt` | `0.95` | extra transcript snapshot |
+| `reinstallAt` | `0` (off) | spawn the reinstall helper |
+| `inputLimit` | `160000` | fallback budget if the model reports none |
+| `cooldownMs` | `120000` | min gap between compact/handoff |
+| `warnCooldownMs` | `300000` | min gap between warnings |
+| `handoffMaxChars` | `16000` | transcript tail kept |
+| `reinstallCooldownMs` | `86400000` | 24h reinstall lock per session |
 
-The input budget comes from the model metadata (`limit.input`, or
-`limit.context - limit.output`). If nothing is reported, `inputLimit` is used.
+Budget source: `limit.input`, else `limit.context - limit.output`, else
+`inputLimit`. Cached per session for 5 minutes.
 
-Set `reinstallAt` to `0` if you only want warnings and compaction. The
-reinstall step is optional and off by default in the plugin itself.
+## [ 03 ] TRIGGERS
 
-## Commands
+```txt
+70%  ── warning                       log only
+85%  ── handoff + reinstall hook      optional, reinstallAt
+90%  ── COMPACT                       the real save
+95%  ── snapshot                      extra handoff
+```
 
-- `/handoff` — save the current transcript to
-  `~/.config/opencode/memory/latest-handoff.md` right now.
-- `/resume` — read `latest-handoff.md` and continue the work in a new session.
+## [ 04 ] COMMANDS
 
-The `handoff` tool is also registered for the model, so it can save state
-before a long operation on its own.
+- `/handoff` — write the transcript to `~/.config/opencode/memory/latest-handoff.md`
+- `/resume` — new session, read that file, continue where you left off
+- `handoff` tool — same thing, callable by the model before long jobs
 
-## Files
+Manual helpers:
 
-| Path | Purpose |
-| --- | --- |
-| `~/.config/opencode/plugins/token-guard/index.ts` | the plugin |
-| `~/.config/opencode/opencode.json` | enable + thresholds |
-| `~/.local/bin/oc-auto-reinstall` | hot/cold reinstall helper |
-| `~/.local/bin/oc-safe-reinstall` | backup / restore helper |
-| `~/.config/opencode/memory/token-guard.log` | activity log |
-| `~/.config/opencode/memory/reinstall.log` | helper log |
-| `~/.config/opencode/memory/latest-handoff.md` | newest handoff |
-| `~/.config/opencode/backups/` | DB, config, and binary snapshots |
-
-Backups are pruned automatically (3 databases, 2 config archives, 1 binary).
-
-## How it works
-
-The plugin subscribes to OpenCode events:
-
-- `session.step.ended` gives token counts per step.
-- `session.compaction.started` / `ended` / `failed` track compaction state.
-
-Used tokens are computed as
-`input + cache.read + cache.write + output`, divided by the model input budget.
-A small file lock per session (`~/.config/opencode/memory/.lock-*`) makes sure
-compaction and handoff fire only once even if the plugin is loaded by more than
-one runtime in the same server.
-
-`oc-auto-reinstall` runs detached and:
-
-1. Waits for the session to become idle (default 10 minutes, `--wait` to change).
-2. Backs up and integrity-checks the SQLite database.
-3. Backs up config and the current binary.
-4. Downloads the OpenCode 2 installer.
-5. Replaces the binary on disk while the service keeps running; refuses to
-   leave an OpenCode 1 binary behind.
-6. Verifies DB integrity and session count, restores the backup on mismatch.
-7. Requests compaction of the same session so it continues with fresh tokens.
-
-See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the full walkthrough.
-
-## Troubleshooting
-
-**Compaction never runs and the context keeps growing.**
-
-Check `~/.config/opencode/memory/token-guard.log` for
-`reinstall pending ... skipping compaction`. While a scheduled reinstall is
-pending, the plugin deliberately skips compaction. The helper waits up to 10
-minutes for **all** sessions to be idle; on timeout it compacts instead. In a
-busy instance that means up to 10 minutes at 100%+ context.
-
-Options:
-
-- Set `reinstallAt` to `0` (compaction only, no waiting).
-- Lower the wait: `oc-auto-reinstall --session <id> --wait 120`.
-- Do not run many sessions at once when you are near the limit.
-
-**`sqlite3: command not found`**
-
-Install sqlite3; the helper needs it for `.backup` and `pragma integrity_check`.
-
-**Plugin is not loaded.**
-
-The `package` path must be absolute and the directory must contain `index.ts`.
-Check the log file — a successful load writes a `setup start (...)` line.
-
-## Manual helpers
-
-```sh
-oc-auto-reinstall                      # hot reinstall, session stays open
-oc-auto-reinstall --dry-run            # backups + installer download only
-oc-auto-reinstall --session <id>       # wait for idle, then reinstall + compaction
+```bash
+oc-auto-reinstall                       # hot swap binary + compact, session stays open
+oc-auto-reinstall --dry-run             # backup + download only
+oc-auto-reinstall --session <id>        # wait for idle, then swap + compact
 oc-auto-reinstall --session <id> --wait 120
-oc-auto-reinstall --cold               # stop service, uninstall, reinstall, restart
+oc-auto-reinstall --cold                # stop service, uninstall, reinstall, restart
 
-oc-safe-reinstall backup               # snapshot the sessions database
-oc-safe-reinstall                      # snapshot + reinstall binary (asks first)
-oc-safe-reinstall restore FILE         # restore a snapshot (stops the service)
+oc-safe-reinstall backup                # DB snapshot
+oc-safe-reinstall                       # snapshot + binary reinstall
+oc-safe-reinstall restore FILE          # roll back (stops service)
 ```
 
-`--cold` is the only mode that closes the running session; reopen OpenCode and
-run `/resume` afterwards.
+## [ 05 ] MECHANICS
 
-## Uninstall
-
-```sh
-./uninstall.sh
+```txt
+used  = input + cache.read + cache.write + output
+ratio = used / inputLimit
 ```
 
-Removes the plugin and helpers, and the plugin entry from `opencode.json`.
-Handoffs, logs, and backups are left in place; delete
-`~/.config/opencode/memory/` and `~/.config/opencode/backups/` yourself if you
-do not want them. `compaction.auto` is left as `false`, so set it back to
-`true` if you want OpenCode's built-in compaction again.
+Events consumed:
 
-## Safety notes
+| event | use |
+| --- | --- |
+| `session.step.ended` | token counters, main trigger |
+| `session.compaction.started` | mark busy |
+| `session.compaction.ended` | clear + reset cooldown |
+| `session.compaction.failed` | clear busy |
 
-- Automatic reinstall replaces the OpenCode binary on disk. It is off by
-  default (`reinstallAt: 0`); set it only if you want that behavior.
-- The helper takes a database backup and checks integrity before touching the
-  binary, and restores the backup if the session count drops.
-- Marker and lock files live in `~/.config/opencode/memory/` and are safe to
-  delete while OpenCode is stopped.
+Per-session `O_EXCL` lock files (`.lock-*`) stop double-fire when the plugin is
+loaded by more than one runtime. Handoffs keep the last 60 messages, tail-capped
+at `handoffMaxChars`.
 
-## License
+Hot reinstall (`oc-auto-reinstall`) sequence:
 
-MIT — see [LICENSE](LICENSE).
+```txt
+flock -> wait idle (600s) -> DB .backup + integrity_check
+      -> config tar + binary copy -> prune old snapshots
+      -> download installer -> swap binary -> version guard
+      -> verify DB + session count -> compact session -> done marker
+```
+
+Rollback path: backup binary, backup DB, restore on missing binary, failed
+version check, corrupt DB, or dropped session count.
+
+## [ 06 ] FILE MAP
+
+| path | what lives there |
+| --- | --- |
+| `plugin/index.ts` | event loop, ratio math, locks, handoff writer, reinstall spawn |
+| `bin/oc-auto-reinstall` | detached hot/cold reinstall + backup + compaction |
+| `bin/oc-safe-reinstall` | manual snapshot / restore / reinstall |
+| `install.sh` | install, uninstall, config merge, legacy migration |
+| `README.md` | this file |
+| `.gitignore` | keeps logs, DB, handoffs, markers out of git |
+
+Runtime state (`~/.config/opencode/`):
+
+```txt
+memory/unlimited-tokens.log     activity
+memory/reinstall.log            helper output
+memory/handoff-*.md             transcripts
+memory/latest-handoff.md        newest transcript
+memory/.lock-*                  per-session locks
+memory/.reinstall-*             in-flight / done markers
+backups/                        DB + config + binary snapshots
+```
+
+## [ 07 ] KNOWN LIMITS
+
+- **Reinstall pending blocks compaction.** While the 85% helper hunts for an
+  idle window (up to 10 min), the plugin skips compaction. On a busy instance
+  that can hit the hard model limit first. Fix: `"reinstallAt": 0`, or
+  `--wait 120`.
+- **Idle means every session.** `/api/session/active` is global; one background
+  session keeps the helper waiting.
+- **Ratio includes cache + output tokens**, so it can read hotter than the raw
+  input size.
+- **Not a quota bypass.** This frees *context* by compacting. It does not touch
+  provider billing, rate limits, or account quotas.
+
+## [ 08 ] UNINSTALL
+
+```bash
+./install.sh --uninstall
+```
+
+Removes plugin + helpers and the config entry. Logs, handoffs, and backups stay
+in `~/.config/opencode/memory/` and `~/.config/opencode/backups/`. `compaction.auto`
+is left `false`; set it `true` for built-in compaction again.
+
+## [ 09 ] LICENSE
+
+MIT. See [LICENSE](LICENSE). Use it on your own machine, at your own risk —
+the reinstall path replaces the OpenCode binary on disk.

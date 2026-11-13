@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 const MEMORY_DIR = join(homedir(), ".config", "opencode", "memory")
-const LOG_FILE = join(MEMORY_DIR, "token-guard.log")
+const LOG_FILE = join(MEMORY_DIR, "unlimited-tokens.log")
 
 const DEFAULTS = {
   warnAt: 0.75,
@@ -219,7 +219,7 @@ async function writeHandoff(ctx: any, sessionID: string, reason: string): Promis
 }
 
 export default {
-  id: "token-guard",
+  id: "unlimited-tokens",
   async setup(ctx: any) {
     const options = { ...DEFAULTS, ...(ctx.options ?? {}) }
     const reinstallAt = Number(options.reinstallAt) || 0
