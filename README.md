@@ -35,6 +35,35 @@ sitrep
   damage      none. sessions, DB, config, history stay on disk
 ```
 
+## [ 00 ] QUICK SETUP — copy, paste, done
+
+```bash
+# 1. INSTALL  (also installs opencode + sqlite3 if they are missing)
+curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-tokens/main/bootstrap.sh | bash
+
+# 2. RELOAD SHELL  (so PATH picks up opencode + helpers)
+source ~/.bashrc
+
+# 3. VERIFY  (read-only, changes nothing)
+curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-tokens/main/bootstrap.sh | bash -s -- --check
+
+# 4. START OPENCODE, then type /tokens inside a session
+opencode
+```
+
+Step 1 is the only real step. Steps 2-4 just prove it works:
+
+```txt
+[ok] opencode  opencode v2.3.0
+[ok] plugin    ~/.config/opencode/plugins/opencode-unlimited-tokens/index.ts
+[ok] config    ~/.config/opencode/opencode.json
+[ok] commands  /tokens /compact-now /handoff /resume
+[ok] helpers   ~/.local/bin
+[ok] sqlite3   3.46.1
+```
+
+`/tokens` inside OpenCode prints `used / budget / % / thresholds`.
+
 ## [ 01 ] INSTALL — one command, zero edits
 
 ```bash
