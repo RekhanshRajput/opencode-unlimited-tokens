@@ -32,4 +32,8 @@ fi
 say "running installer"
 bash "$SRC/install.sh" "$@"
 
+case " $* " in
+  *" --check "*|*" --uninstall "*|*" -u "*) exit 0 ;;
+esac
+
 printf '\n\033[0;32m[✓]\033[0m done. log: ~/.config/opencode/memory/unlimited-tokens.log\n'
