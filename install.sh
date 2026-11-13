@@ -2,8 +2,10 @@
 # ─────────────────────────────────────────────────────────────
 #  OPENCODE UNLIMITED TOKENS
 #  zero-touch installer
-#    ./install.sh            install everything + restart service
-#    ./install.sh --no-restart
+#    ./install.sh                install everything, auto-install deps
+#    ./install.sh --no-restart   do not touch the running service
+#    ./install.sh --no-opencode  do not install opencode automatically
+#    ./install.sh --no-sqlite    do not install sqlite3 automatically
 #    ./install.sh --uninstall
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -15,6 +17,8 @@ OLD_PLUGIN_DIR="$CONFIG_DIR/plugins/token-guard"
 BIN_DIR="$HOME/.local/bin"
 CFG="$CONFIG_DIR/opencode.json"
 RESTART=1
+AUTO_OPENCODE=1
+AUTO_SQLITE=1
 MODE="install"
 
 for arg in "$@"; do
@@ -22,6 +26,8 @@ for arg in "$@"; do
     --uninstall|-u) MODE="uninstall" ;;
     --no-restart) RESTART=0 ;;
     --restart) RESTART=1 ;;
+    --no-opencode) AUTO_OPENCODE=0 ;;
+    --no-sqlite) AUTO_SQLITE=0 ;;
     --help|-h) MODE="help" ;;
     *) printf '\033[0;31m[x]\033[0m unknown option: %s\n' "$arg" >&2; exit 1 ;;
   esac
@@ -35,25 +41,88 @@ usage() {
   cat <<'EOF'
 opencode-unlimited-tokens
 
-  ./install.sh               install + patch config + restart opencode service
-  ./install.sh --no-restart  install without touching the running service
-  ./install.sh --uninstall   remove plugin, helpers, commands
+  ./install.sh                install everything (auto-installs opencode + sqlite3)
+  ./install.sh --no-restart   do not touch the running service
+  ./install.sh --no-opencode  do not install opencode automatically
+  ./install.sh --no-sqlite    do not install sqlite3 automatically
+  ./install.sh --uninstall    remove plugin, helpers, commands
 EOF
 }
 
-ensure_path() {
+ensure_path_dir() {
+  local dir="$1" rel marker line rc
+  dir="${dir%/}"
   case ":$PATH:" in
-    *":$BIN_DIR:"*) return 0 ;;
+    *":$dir:"*) return 0 ;;
   esac
-  local marker='# opencode-unlimited-tokens: local helpers'
-  local line='export PATH="$HOME/.local/bin:$PATH"'
-  local rc
+  export PATH="$dir:$PATH"
+  rel="${dir/#$HOME/\$HOME}"
+  marker="# opencode-unlimited-tokens: $rel"
+  line="export PATH=\"$rel:\$PATH\""
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     [ -f "$rc" ] || continue
     grep -qsF "$marker" "$rc" && continue
     printf '\n%s\n%s\n' "$marker" "$line" >>"$rc"
     say "PATH updated in $rc"
   done
+}
+
+ensure_opencode() {
+  if command -v opencode >/dev/null 2>&1; then
+    say "opencode found: $(opencode --version 2>/dev/null | head -1)"
+    return 0
+  fi
+  local candidate
+  for candidate in "$HOME/.opencode/bin/opencode" /usr/local/bin/opencode /opt/homebrew/bin/opencode; do
+    if [ -x "$candidate" ]; then
+      say "found opencode at $candidate"
+      ensure_path_dir "$(dirname "$candidate")"
+      return 0
+    fi
+  done
+  if [ "$AUTO_OPENCODE" -ne 1 ]; then
+    warn "opencode not installed; run: curl -fsSL https://opencode.ai/v2/install | bash"
+    return 1
+  fi
+  say "opencode missing; installing OpenCode 2"
+  local inst src
+  inst="$(mktemp)"
+  src="${UT_OPENCODE_INSTALLER:-https://opencode.ai/v2/install}"
+  if [ -f "$src" ]; then
+    cp "$src" "$inst"
+  elif ! curl -fsSL --max-time 180 "$src" -o "$inst"; then
+    rm -f "$inst"
+    warn "could not download the opencode installer"
+    return 1
+  fi
+  if ! bash "$inst" --no-modify-path >/dev/null 2>&1; then
+    bash "$inst" >/dev/null 2>&1 || true
+  fi
+  rm -f "$inst"
+  ensure_path_dir "$HOME/.opencode/bin"
+  if command -v opencode >/dev/null 2>&1; then
+    say "opencode installed: $(opencode --version 2>/dev/null | head -1)"
+    return 0
+  fi
+  warn "automatic install failed; run: curl -fsSL https://opencode.ai/v2/install | bash"
+  return 1
+}
+
+ensure_sqlite() {
+  if command -v sqlite3 >/dev/null 2>&1; then
+    say "sqlite3 found"
+    return 0
+  fi
+  if [ "$AUTO_SQLITE" -eq 1 ] && command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    say "sqlite3 missing; installing via apt"
+    sudo -n apt-get update -qq >/dev/null 2>&1 || true
+    if sudo -n apt-get install -y -qq sqlite3 >/dev/null 2>&1; then
+      say "sqlite3 installed"
+      return 0
+    fi
+  fi
+  warn "sqlite3 missing; raw-copy DB backups will be used"
+  return 1
 }
 
 restart_opencode() {
@@ -246,9 +315,9 @@ JS
 }
 
 do_install() {
-  command -v opencode >/dev/null 2>&1 || warn "opencode not in PATH (install it first)"
   command -v curl >/dev/null 2>&1 || warn "curl missing (needed by the reinstall helper)"
-  command -v sqlite3 >/dev/null 2>&1 || warn "sqlite3 missing (raw-copy backup fallback will be used)"
+  ensure_opencode || true
+  ensure_sqlite || true
 
   say "payload -> $PLUGIN_DIR"
   mkdir -p "$CONFIG_DIR" "$BIN_DIR"
@@ -262,7 +331,7 @@ do_install() {
   say "helpers -> $BIN_DIR"
   install -m 755 "$REPO_DIR/bin/oc-auto-reinstall" "$BIN_DIR/oc-auto-reinstall"
   install -m 755 "$REPO_DIR/bin/oc-safe-reinstall" "$BIN_DIR/oc-safe-reinstall"
-  ensure_path
+  ensure_path_dir "$BIN_DIR"
 
   if [ -f "$CFG" ]; then
     cp "$CFG" "$CFG.bak.$(date +%Y%m%d-%H%M%S)"
@@ -281,6 +350,23 @@ do_install() {
   say "armed. log: $CONFIG_DIR/memory/unlimited-tokens.log"
   say "commands: /tokens  /compact-now  /handoff  /resume"
   warn "reinstallAt defaults to 0.85; set it to 0 for compaction-only (no binary swap)"
+  status_summary
+}
+
+status_summary() {
+  local oc sq
+  oc="$(command -v opencode >/dev/null 2>&1 && opencode --version 2>/dev/null | head -1 || echo missing)"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sq="$(sqlite3 --version 2>/dev/null | cut -d' ' -f1)"
+  else
+    sq="missing (raw-copy fallback)"
+  fi
+  printf '\n'
+  say "status"
+  printf '    opencode : %s\n' "$oc"
+  printf '    sqlite3  : %s\n' "$sq"
+  printf '    plugin   : %s\n' "$([ -f "$PLUGIN_DIR/index.ts" ] && echo "$PLUGIN_DIR/index.ts" || echo 'MISSING')"
+  printf '    config   : %s\n' "$CFG"
 }
 
 do_uninstall() {

@@ -31,7 +31,7 @@ sitrep
   plugin      context watchdog, fires on session.step.ended
   trigger     70% warn | 85% handoff + reinstall hook | 90% compact | 95% snapshot
   commands    /tokens  /compact-now  /handoff  /resume
-  install     one command. config patched, PATH fixed, service restarted.
+  install     one command. deps auto, config patched, PATH fixed, service restarted.
   damage      none. sessions, DB, config, history stay on disk
 ```
 
@@ -44,15 +44,20 @@ curl -fsSL https://raw.githubusercontent.com/RekhanshRajput/opencode-unlimited-t
 That single line:
 
 1. pulls the latest repo tarball (no `git` needed),
-2. installs the plugin + both helpers,
-3. backs up and patches `~/.config/opencode/opencode.json` (thresholds + all commands),
-4. adds `~/.local/bin` to your shell rc if it is missing,
-5. restarts the OpenCode background service so the plugin is live immediately.
+2. **installs OpenCode 2 first if it is missing** (or just fixes PATH if it is already on disk),
+3. **installs `sqlite3` via apt when passwordless sudo is available**, else falls back to raw-copy DB backups,
+4. installs the plugin + both helpers,
+5. backs up and patches `~/.config/opencode/opencode.json` (thresholds + all commands),
+6. adds `~/.local/bin` and `~/.opencode/bin` to your shell rc when missing,
+7. restarts the OpenCode background service so the plugin is live immediately,
+8. prints a status block (`opencode`, `sqlite3`, plugin, config).
 
-Reload in place, skip the restart: append `-s -- --no-restart`:
+Skip any step:
 
 ```bash
-curl -fsSL .../bootstrap.sh | bash -s -- --no-restart
+curl -fsSL .../bootstrap.sh | bash -s -- --no-restart    # keep current service
+curl -fsSL .../bootstrap.sh | bash -s -- --no-opencode   # never auto-install opencode
+curl -fsSL .../bootstrap.sh | bash -s -- --no-sqlite     # never touch apt
 ```
 
 Manual clone (same result):
@@ -63,8 +68,8 @@ cd opencode-unlimited-tokens
 ./install.sh
 ```
 
-Requirements: `curl` + `tar`. `sqlite3` is optional (raw-copy DB fallback), and
-one of `python3` / `node` is used to merge JSON — no manual editing either way.
+Hard requirements: `curl` + `tar` only. Everything else is auto-detected,
+auto-installed, or gracefully degraded.
 
 ## [ 02 ] LOADOUT
 
